@@ -2,173 +2,134 @@ using System;
 using Godot;
 using Riptide;
 
-namespace Networking
+namespace Networking;
+
+public class NetworkedVariable<T>
 {
-  public class NetworkedVariable<ValueType>
-  {
-    public enum Authority
-    {
-      Server,
-      Client
-    }
-
-    public enum UpdateEvent
-    {
-      Change,
-      Manual
-    }
-
-    private ValueType _value;
-    public ValueType Value
-    {
-      get
-      {
-        return _value;
-      }
-
-      set
-      {
-        Synced = true;
-
-        if (_updateEvent == UpdateEvent.Change && !_value.Equals(value)) SendUpdate();
-
-        _value = value;
-      }
-    }
-
     public bool Synced = false;
+    public T Value
+    {
+        get => _value;
+        set
+        {
+            Synced = true;
 
-    private string _name;
+            if (_syncMode == VariableSyncMode.Auto && !_value.Equals(value))
+            {
+                SendUpdate();
+            }
+
+            _value = value;
+        }
+    }
+    
+    private T _value;
+    
     private Node _node;
     private NetworkNode _source;
-    private Authority _authority;
-    private UpdateEvent _updateEvent;
-    private MessageSendMode _messageSendMode;
-    private uint _minimumSendDelay;
+    private string _varName;
+
     private ulong _lastSentTick;
-    private int _lastRecievedIndex = -1;
     private int _lastSentIndex = -1;
+    private int _lastRecievedIndex = -1;
+    
+    private readonly uint _minSendDelay;
+    private readonly VariableAuthority _authority;
+    private readonly VariableSyncMode _syncMode;
+    private readonly MessageSendMode _msgSendMode;
 
-    public NetworkedVariable(ValueType intitalValue, uint minimumSendDelay = 30, Authority authority = Authority.Client, UpdateEvent updateEvent = UpdateEvent.Manual, MessageSendMode messageSendMode = MessageSendMode.Unreliable)
+    public NetworkedVariable(T defaultValue, uint minSendDelay = 50, VariableAuthority authority = VariableAuthority.NodeOwner, VariableSyncMode syncMode = VariableSyncMode.Manual, MessageSendMode msgSendMode = MessageSendMode.Unreliable)
     {
-      _value = intitalValue;
-      _minimumSendDelay = minimumSendDelay;
-      _authority = authority;
-      _updateEvent = updateEvent;
-      _messageSendMode = messageSendMode;
-
-      if (_minimumSendDelay < 50) _minimumSendDelay = 50;
+        _value = defaultValue;
+        _minSendDelay = minSendDelay;
+        _authority = authority;
+        _syncMode = syncMode;
+        _msgSendMode = msgSendMode;
     }
 
-    public void Register(Node node, NetworkNode source, string name)
+    public void Register(Node node, NetworkNode source, string varName)
     {
-      _node = node;
-      _source = source;
-      _name = name;
+        _node = node;
+        _source = source;
+        _varName = varName;
     }
 
     public void Sync()
     {
-      SendUpdate();
-    }
-
-    private Action<Message> SetupMessage(bool propogate)
-    {
-      return (Message message) =>
-      {
-        message.AddBool(propogate);
-
-        _lastSentIndex++;
-
-        message.AddInt(_lastSentIndex);
-
-        if (typeof(ValueType) == typeof(int))
-        {
-          message.AddInt((int)(object)_value);
-        }
-
-        if (typeof(ValueType) == typeof(float))
-        {
-          message.AddFloat((float)(object)_value);
-        }
-
-        if (typeof(ValueType) == typeof(Vector2))
-        {
-          Vector2 castedValue = (Vector2)(object)_value;
-          message.AddFloat(castedValue.X);
-          message.AddFloat(castedValue.Y);
-        }
-
-        if (typeof(ValueType) == typeof(Vector3))
-        {
-          Vector3 castedValue = (Vector3)(object)_value;
-          message.AddFloat(castedValue.X);
-          message.AddFloat(castedValue.Y);
-          message.AddFloat(castedValue.Z);
-        }
-      };
+        SendUpdate();
     }
 
     private void SendUpdate()
     {
-      if (_source == null) throw new Exception("Can not send updates for a networked variable that has not been setup!");
+        if (_source == null)
+        {
+            throw new Exception("Can not send updates for an unregistered network variable!");
+        }
 
-      if (!_source.HasAuthority()) return;
+        ulong now = Time.GetTicksMsec();
+        
+        if (now - _lastSentTick < _minSendDelay) return;
 
-      ulong now = Time.GetTicksMsec();
-
-      if (now - _lastSentTick < _minimumSendDelay) return;
-
-      _lastSentTick = now;
-
-      if (_authority == Authority.Server)
-      {
-        NetworkManager.SendRpcToClients(_node, _name, SetupMessage(false), _messageSendMode);
-      }
-
-      if (_authority == Authority.Client)
-      {
-        NetworkManager.SendRpcToServer(_node, _name, SetupMessage(true), _messageSendMode);
-      }
+        _lastSentTick = now;
+    
+        if (_authority == VariableAuthority.Server && NetworkManager.IsHost)
+        {
+            NetworkManager.SendRpcToClients(_node, _varName, BuildMessage(false), _msgSendMode);
+            return;
+        }
+        if (_authority == VariableAuthority.NodeOwner && _source.HasAuthority())
+        {
+            NetworkManager.SendRpcToServer(_node, _varName, BuildMessage(true), _msgSendMode);
+        }
     }
 
-    public void ReceiveUpdate(Message message)
+    public void ReceiveUpdate(Message msg)
     {
-      bool propogate = message.GetBool();
+        bool bounceToClients = msg.GetBool();
+        int index = msg.GetInt();
 
-      int index = message.GetInt();
+        if (index <= _lastRecievedIndex) return;
 
-      if (index <= _lastRecievedIndex) return;
+        _lastRecievedIndex = index;
+        _lastSentIndex = Math.Max(_lastSentIndex, _lastRecievedIndex);
 
-      _lastRecievedIndex = index;
-      _lastSentIndex = Math.Max(_lastSentIndex, _lastRecievedIndex);
+        Synced = true;
 
-      Synced = true;
-
-      if (!(_authority == Authority.Client && _source.HasAuthority()) && !(_authority == Authority.Server && NetworkManager.IsHost))
-      {
-        if (typeof(ValueType) == typeof(int))
+        if (!_source.HasAuthority())
         {
-          _value = (ValueType)(object)message.GetInt();
+            _value = (T) NetworkedVariableTypes.Decode(typeof(T), msg);
         }
 
-        if (typeof(ValueType) == typeof(float))
+        if (bounceToClients)
         {
-          _value = (ValueType)(object)message.GetFloat();
+            NetworkManager.SendRpcToClients(_node, _varName, BuildMessage(false), _msgSendMode);
         }
-
-        if (typeof(ValueType) == typeof(Vector2))
-        {
-          _value = (ValueType)(object)new Vector2(message.GetFloat(), message.GetFloat());
-        }
-
-        if (typeof(ValueType) == typeof(Vector3))
-        {
-          _value = (ValueType)(object)new Vector3(message.GetFloat(), message.GetFloat(), message.GetFloat());
-        }
-      }
-
-      if (propogate) NetworkManager.SendRpcToClients(_node, _name, SetupMessage(false), _messageSendMode);
     }
-  }
+
+    private Action<Message> BuildMessage(bool bounceToClients)
+    {
+        return (Message msg) =>
+        {
+            msg.AddBool(bounceToClients);
+
+            _lastSentIndex++;
+
+            msg.AddInt(_lastSentIndex);
+
+            NetworkedVariableTypes.Encode(typeof(T), msg, _value);
+        };
+    }
 }
+
+public enum VariableSyncMode
+{
+    Manual,
+    Auto
+}
+
+public enum VariableAuthority
+{
+    NodeOwner,
+    Server
+}
+

@@ -40,8 +40,9 @@ namespace Networking {
     public override void _Ready() {
       s_Me = this;
 
+      NetworkedVariableTypes.RegisterBuiltIn();
       RiptideLogger.Initialize(GD.Print, GD.Print, GD.PushWarning, GD.PushError, false);
-
+      
       _lobbyCreatedCallback = Callback<LobbyCreated_t>.Create(LobbyCreated);
       _lobbyEnteredCallback = Callback<LobbyEnter_t>.Create(LobbyEntered);
       _gameLobbyJoinRequestedCallback = Callback<GameLobbyJoinRequested_t>.Create(GameLobbyJoinRequested);
@@ -60,7 +61,7 @@ namespace Networking {
       source.Register(node, name, messageHandler);
     }
 
-    public static void Register<ValueType>(Node node, string name, NetworkedVariable<ValueType> syncedVariable) {
+    public static void Register<T>(Node node, string name, NetworkedVariable<T> syncedVariable) {
       NetworkNode source = GetNetworkNode(node);
 
       if (source == null) throw new Exception("Can not register Rpc for node that does not have a network node!");

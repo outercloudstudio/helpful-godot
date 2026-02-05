@@ -17,7 +17,7 @@ public partial class NetworkNode : Node {
         GD.Print($"Registered rpc ${GetLocalPath(node) + ":" + name}");
     }
 
-    public void Register<ValueType>(Node node, string name, NetworkedVariable<ValueType> syncedVariable) {
+    public void Register<T>(Node node, string name, NetworkedVariable<T> syncedVariable) {
         syncedVariable.Register(node, this, name);
 
         _registeredMessageHandlers.Add(GetLocalPath(node) + ":" + name, syncedVariable.ReceiveUpdate);
